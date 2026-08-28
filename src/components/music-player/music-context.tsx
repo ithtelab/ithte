@@ -48,6 +48,16 @@ interface MusicContextValue {
 
 const MusicContext = createContext<MusicContextValue | null>(null);
 
+// 连续播放失败熔断阈值:达到后停止自动切歌,提示检查登录状态
+const PLAY_FAILURE_LIMIT = 3;
+
+/** 随机取下一首的索引,保证不会随机到当前这首(count>1 时) */
+function randomNextIndex(count: number, current: number) {
+  if (count <= 1) return current;
+  const index = Math.floor(Math.random() * count);
+  return index === current ? (index + 1) % count : index;
+}
+
 export function MusicProvider({ children }: { children: ReactNode }) {
   const audioRef = useRef<HTMLAudioElement>(null);
   const audioContextRef = useRef<AudioContext | null>(null);
@@ -74,6 +84,13 @@ export function MusicProvider({ children }: { children: ReactNode }) {
   const [volume, setVolumeState] = useState(0.75);
   const [lyricsEnabled, setLyricsEnabled] = useState(true);
   const [playerExpanded, setPlayerExpanded] = useState(false);
+
+  // 取址请求序号:快速连点时丢弃过期响应,避免「播 A 显 B」竞态
+  const requestIdRef = useRef(0);
+  // 连续播放失败计数(成功播放一首后清零)
+  const failureCountRef = useRef(0);
+  // 主动清空 src(load)时的媒体 error 不算播放失败
+  const ignoreMediaErrorRef = useRef(false);
 
   useEffect(() => {
     const frame = requestAnimationFrame(() => {
@@ -134,6 +151,13 @@ export function MusicProvider({ children }: { children: ReactNode }) {
       source.connect(analyser);
       analyser.connect(context.destination);
 
+      // iOS 来电/切后台会挂起 Web Audio 图,输出静音但 <audio> 仍在「播放」。
+      // 挂起时尝试恢复;恢复失败(无手势)就暂停元素,让 UI 与真实状态保持一致。
+      context.onstatechange = () => {
+        if (context.state !== 'suspended') return;
+        void context.resume().catch(() => audioRef.current?.pause());
+      };
+
       audioContextRef.current = context;
       audioSourceRef.current = source;
       analyserRef.current = analyser;
@@ -151,6 +175,18 @@ export function MusicProvider({ children }: { children: ReactNode }) {
   useEffect(() => {
     if (isPlaying) void ensureAudioAnalyser();
   }, [isPlaying, ensureAudioAnalyser]);
+
+  // 页面重新可见时恢复被挂起的 AudioContext(失败则暂停元素同步 UI)
+  useEffect(() => {
+    const resumeSuspendedContext = () => {
+      const context = audioContextRef.current;
+      if (!context || context.state !== 'suspended') return;
+      if (audioRef.current?.paused) return;
+      void context.resume().catch(() => audioRef.current?.pause());
+    };
+    document.addEventListener('visibilitychange', resumeSuspendedContext);
+    return () => document.removeEventListener('visibilitychange', resumeSuspendedContext);
+  }, []);
 
   useEffect(() => {
     return () => {
@@ -218,7 +254,8 @@ export function MusicProvider({ children }: { children: ReactNode }) {
   */
   useEffect(() => {
     const track = tracks[currentIndex];
-    if (!track) return;
+    // 关闭歌词时不请求歌词接口(对外暴露的 lyricLoading 由渲染侧按开关派生)
+    if (!lyricsEnabled || !track) return;
     let alive = true;
     (async () => {
       try {
@@ -238,7 +275,22 @@ export function MusicProvider({ children }: { children: ReactNode }) {
     return () => {
       alive = false;
     };
-  }, [currentIndex, tracks]);
+  }, [currentIndex, tracks, lyricsEnabled]);
+
+  /* ---------- 播放失败熔断 ----------
+     连续失败达到阈值后停止自动切歌,给出需要登录/稍后再试的提示。
+     next 通过 ref 调用,避免 handlePlaybackFailure ↔ loadTrack 循环依赖。
+  */
+  const nextRef = useRef<() => void>(() => {});
+  const handlePlaybackFailure = useCallback((message?: string) => {
+    failureCountRef.current += 1;
+    if (failureCountRef.current < PLAY_FAILURE_LIMIT) {
+      nextRef.current();
+      return;
+    }
+    setUrlError(message || '连续多首歌曲播放失败，已停止自动切换，请检查网易云登录状态或稍后再试');
+    setIsPlaying(false);
+  }, []);
 
   /* ---------- 播放 ---------- */
   const loadTrack = useCallback(
@@ -246,8 +298,12 @@ export function MusicProvider({ children }: { children: ReactNode }) {
       const audio = audioRef.current;
       const track = tracks[index];
       if (!audio || !track) return;
+      const requestId = ++requestIdRef.current;
       if (autoplay) void ensureAudioAnalyser();
       setCurrentIndex(index);
+      // 立即重置进度,避免短暂显示上一首的进度与时长
+      setCurrentTime(0);
+      setDuration(0);
       setUrlError('');
       setLyricLoading(true);
       setLyricError('');
@@ -255,27 +311,40 @@ export function MusicProvider({ children }: { children: ReactNode }) {
       try {
         const res = await fetch(`/api/music/url?id=${track.id}`);
         const json = await res.json();
+        // 已有更新的取址请求,这份过期响应直接丢弃
+        if (requestIdRef.current !== requestId) return;
         if (!res.ok || !json.ok || !json.url) {
           setUrlError(json.error || '播放地址获取失败');
+          ignoreMediaErrorRef.current = true;
           audio.removeAttribute('src');
           audio.load();
+          ignoreMediaErrorRef.current = false;
           setIsPlaying(false);
+          // 顺播链条上的失败自动跳下一首;用户点选的失败只提示不强切
+          if (autoplay) handlePlaybackFailure();
           return;
         }
         audio.src = json.url;
         audio.load();
         if (autoplay) {
-          audio.play().catch(() => setIsPlaying(false));
-          setIsPlaying(true);
+          try {
+            await audio.play();
+            failureCountRef.current = 0;
+          } catch {
+            // 自动播放策略拒绝等场景:以 pause 事件与 catch 为准,不做乐观置位
+            setIsPlaying(false);
+          }
         } else {
           setIsPlaying(false);
         }
       } catch (err) {
+        if (requestIdRef.current !== requestId) return;
         setUrlError(err instanceof Error ? err.message : String(err));
         setIsPlaying(false);
+        if (autoplay) handlePlaybackFailure();
       }
     },
-    [tracks, ensureAudioAnalyser],
+    [tracks, ensureAudioAnalyser, handlePlaybackFailure],
   );
 
   const playTrack = useCallback(
@@ -292,11 +361,15 @@ export function MusicProvider({ children }: { children: ReactNode }) {
       return;
     }
     if (audio.paused) {
-      audio.play().catch(() => {});
-      setIsPlaying(true);
+      // isPlaying 以 onPlay/onPause 事件为唯一真源,这里只负责发起播放
+      audio.play().then(() => {
+        failureCountRef.current = 0;
+      }).catch(() => {
+        setIsPlaying(false);
+        setUrlError((prev) => prev || '播放被浏览器拦截，请再点击一次播放按钮');
+      });
     } else {
       audio.pause();
-      setIsPlaying(false);
     }
   }, [currentIndex, loadTrack, ensureAudioAnalyser]);
 
@@ -306,7 +379,7 @@ export function MusicProvider({ children }: { children: ReactNode }) {
     const count = tracks.length;
     if (!count) return;
     const index = isShuffleRef.current
-      ? Math.floor(Math.random() * count)
+      ? randomNextIndex(count, currentIndex)
       : (currentIndex + 1) % count;
     loadTrack(index, true);
   }, [currentIndex, tracks.length, loadTrack]);
@@ -321,10 +394,14 @@ export function MusicProvider({ children }: { children: ReactNode }) {
       return;
     }
     const index = isShuffleRef.current
-      ? Math.floor(Math.random() * count)
+      ? randomNextIndex(count, currentIndex)
       : (currentIndex - 1 + count) % count;
     loadTrack(index, true);
   }, [currentIndex, tracks.length, loadTrack]);
+
+  useEffect(() => {
+    nextRef.current = next;
+  }, [next]);
 
   const seek = useCallback((time: number) => {
     const audio = audioRef.current;
@@ -339,6 +416,61 @@ export function MusicProvider({ children }: { children: ReactNode }) {
   );
 
   const currentTrack = tracks[currentIndex] ?? null;
+
+  /* ---------- 锁屏/系统媒体控制(MediaSession) ---------- */
+  useEffect(() => {
+    if (typeof navigator === 'undefined' || !('mediaSession' in navigator)) return;
+    if (!currentTrack) {
+      navigator.mediaSession.metadata = null;
+      return;
+    }
+    navigator.mediaSession.metadata = new MediaMetadata({
+      title: currentTrack.title,
+      artist: currentTrack.artist,
+      album: currentTrack.album,
+      artwork: currentTrack.cover ? [{ src: currentTrack.cover, sizes: '512x512' }] : [],
+    });
+  }, [currentTrack]);
+
+  useEffect(() => {
+    if (typeof navigator === 'undefined' || !('mediaSession' in navigator)) return;
+    navigator.mediaSession.playbackState = isPlaying ? 'playing' : 'paused';
+  }, [isPlaying]);
+
+  useEffect(() => {
+    if (typeof navigator === 'undefined' || !('mediaSession' in navigator)) return;
+    const session = navigator.mediaSession;
+    try {
+      session.setActionHandler('play', () => togglePlay());
+      session.setActionHandler('pause', () => togglePlay());
+      session.setActionHandler('previoustrack', () => prev());
+      session.setActionHandler('nexttrack', () => next());
+      session.setActionHandler('seekto', (details) => {
+        if (details.seekTime != null && Number.isFinite(details.seekTime)) seek(details.seekTime);
+      });
+    } catch {
+      /* 部分平台不支持这些动作 */
+    }
+    return () => {
+      try {
+        session.setActionHandler('play', null);
+        session.setActionHandler('pause', null);
+        session.setActionHandler('previoustrack', null);
+        session.setActionHandler('nexttrack', null);
+        session.setActionHandler('seekto', null);
+      } catch {
+        /* ignore */
+      }
+    };
+  }, [togglePlay, next, prev, seek]);
+
+  const handleMediaError = useCallback(() => {
+    const audio = audioRef.current;
+    if (!audio || !audio.src || ignoreMediaErrorRef.current) return;
+    // MEDIA_ERR_ABORTED(1) 是主动换源/清源,不算播放失败
+    if (audio.error?.code === 1) return;
+    handlePlaybackFailure('当前歌曲加载失败，自动切换下一首…');
+  }, [handlePlaybackFailure]);
 
   return (
     <MusicContext.Provider
@@ -359,7 +491,7 @@ export function MusicProvider({ children }: { children: ReactNode }) {
         lyricsEnabled,
         playerExpanded,
         lyrics,
-        lyricLoading,
+        lyricLoading: lyricsEnabled ? lyricLoading : false,
         lyricError,
         audioAnalyser,
         getPlaybackTime,
@@ -391,6 +523,7 @@ export function MusicProvider({ children }: { children: ReactNode }) {
             next();
           }
         }}
+        onError={handleMediaError}
         onPlay={() => setIsPlaying(true)}
         onPause={() => setIsPlaying(false)}
       />

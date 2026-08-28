@@ -208,11 +208,42 @@ export function MusicPlayer() {
     };
   }, []);
 
+  const createLoginQr = async () => {
+    setLoginOpen(true);
+    setLoginLoading(true);
+    setLoginError('');
+    setLoginState('正在生成二维码…');
+    setLoginQrKey('');
+    setLoginQrImage('');
+    try {
+      const response = await fetch('/api/music/auth/qr', {
+        method: 'POST',
+        headers: { 'Content-Type': 'application/json' },
+        body: JSON.stringify({ action: 'create' }),
+      });
+      const json = await response.json();
+      if (!response.ok || !json.ok || !json.key || !json.qrimg) {
+        throw new Error(json.error || '二维码生成失败');
+      }
+      setLoginQrImage(json.qrimg);
+      setLoginQrKey(json.key);
+      setLoginState('请使用网易云音乐 App 扫码');
+    } catch (error) {
+      setLoginError(error instanceof Error ? error.message : String(error));
+      setLoginState('');
+    } finally {
+      setLoginLoading(false);
+    }
+  };
+
   useEffect(() => {
     if (!loginOpen || !loginQrKey) return;
 
     let stopped = false;
     let timer: ReturnType<typeof setTimeout> | null = null;
+    let failures = 0;
+    const POLL_INTERVAL = 1300;
+    const MAX_FAILURES = 5;
 
     const poll = async () => {
       try {
@@ -225,6 +256,9 @@ export function MusicPlayer() {
         if (stopped) return;
         if (!response.ok || !json.ok) throw new Error(json.error || '登录状态检查失败');
 
+        failures = 0;
+        setLoginError('');
+
         if (json.code === 803) {
           setNeteaseLoggedIn(true);
           setNeteaseProfile(json.profile || null);
@@ -234,15 +268,26 @@ export function MusicPlayer() {
         }
         if (json.code === 802) setLoginState('已扫码，请在手机上确认');
         else if (json.code === 800) {
-          setLoginState('二维码已过期');
+          // 二维码过期自动重建:仅清 key,由下方「sign 过期触发重建」逻辑重新生成
+          setLoginState('二维码已过期，正在自动刷新…');
           setLoginQrKey('');
           return;
         } else setLoginState('请使用网易云音乐 App 扫码');
       } catch (error) {
-        if (!stopped) setLoginError(error instanceof Error ? error.message : String(error));
+        if (stopped) return;
+        failures += 1;
+        if (failures >= MAX_FAILURES) {
+          setLoginError('网络异常，已停止轮询，请点击「刷新二维码」重试');
+          setLoginQrKey('');
+          return;
+        }
+        setLoginError(`网络波动，正在重试（${failures}/${MAX_FAILURES}）…`);
+        // 指数退避:1.3s → 2.6s → 5.2s → 8s(封顶)
+        timer = setTimeout(poll, Math.min(POLL_INTERVAL * 2 ** failures, 8000));
+        return;
       }
 
-      if (!stopped) timer = setTimeout(poll, 1300);
+      if (!stopped) timer = setTimeout(poll, POLL_INTERVAL);
     };
 
     void poll();
@@ -286,50 +331,47 @@ export function MusicPlayer() {
   const activeTrack = currentTrack;
 
   useLayoutEffect(() => {
-    if (typeof window === 'undefined') return;
+    // 拖拽中只更新视图;拖拽结束(或其他吸附/校正后)才落盘,避免 pointermove 频率同步写 localStorage
+    if (dragging) return;
     try {
       localStorage.setItem('yuniao-music-player', JSON.stringify(pos));
     } catch {
       /* ignore */
     }
-  }, [pos]);
+  }, [pos, dragging]);
 
   const displayedTime = seekPreview ?? currentTime;
   const progressPct = duration ? Math.min((displayedTime / duration) * 100, 100) : 0;
 
-  const createLoginQr = async () => {
-    setLoginOpen(true);
-    setLoginLoading(true);
-    setLoginError('');
-    setLoginState('正在生成二维码…');
-    setLoginQrKey('');
-    setLoginQrImage('');
-    try {
-      const response = await fetch('/api/music/auth/qr', {
-        method: 'POST',
-        headers: { 'Content-Type': 'application/json' },
-        body: JSON.stringify({ action: 'create' }),
-      });
-      const json = await response.json();
-      if (!response.ok || !json.ok || !json.key || !json.qrimg) {
-        throw new Error(json.error || '二维码生成失败');
-      }
-      setLoginQrImage(json.qrimg);
-      setLoginQrKey(json.key);
-      setLoginState('请使用网易云音乐 App 扫码');
-    } catch (error) {
-      setLoginError(error instanceof Error ? error.message : String(error));
-      setLoginState('');
-    } finally {
-      setLoginLoading(false);
-    }
-  };
+  // createLoginQr 在上面已被定义为普通函数;这里用 ref 转发以稳定引用给 effect 用
+  const createLoginQrRef = useRef(createLoginQr);
+  useEffect(() => {
+    createLoginQrRef.current = createLoginQr;
+  });
+
+  // 登录面板打开、但当前无有效 key(首次进入或二维码过期后)时自动生成,避免手动刷新
+  useEffect(() => {
+    if (!loginOpen || loginQrKey || loginLoading) return;
+    void createLoginQrRef.current();
+  }, [loginOpen, loginQrKey, loginLoading]);
 
   const logoutNetease = async () => {
     await fetch('/api/music/auth/status', { method: 'DELETE' }).catch(() => {});
     setNeteaseLoggedIn(false);
     setNeteaseProfile(null);
   };
+
+  // iOS Safari 的 audio.volume 只读,音量控件无效,降级为系统音量提示
+  const [iosVolumeUnsupported, setIosVolumeUnsupported] = useState(false);
+  useEffect(() => {
+    const detect = () => {
+      const ua = navigator.userAgent;
+      const isIOS = /iPad|iPhone|iPod/.test(ua)
+        || (navigator.platform === 'MacIntel' && navigator.maxTouchPoints > 1);
+      setIosVolumeUnsupported(isIOS);
+    };
+    detect();
+  }, []);
 
   const toggleMute = () => {
     if (volume > 0.01) {
@@ -475,8 +517,10 @@ export function MusicPlayer() {
 
   const finishSeeking = (element: HTMLDivElement, pointerId: number, clientX?: number) => {
     if (seekPointerIdRef.current !== pointerId) return;
-    const time = clientX === undefined ? seekPreviewRef.current : updateSeekPreview(element, clientX);
-    if (time !== null) seek(time);
+    // pointer cancel(clientX 为空)时回弹到当前进度,不应用预览位置
+    if (clientX !== undefined) {
+      seek(updateSeekPreview(element, clientX));
+    }
     seekPointerIdRef.current = null;
     seekPreviewRef.current = null;
     setSeekPreview(null);
@@ -708,36 +752,42 @@ export function MusicPlayer() {
               </div>
 
               <div className="mt-3 flex h-10 items-center gap-2.5 rounded-lg border border-white/[0.07] bg-white/[0.035] px-2.5">
-                <button
-                  type="button"
-                  onClick={toggleMute}
-                  title={volume > 0.01 ? '静音' : '恢复音量'}
-                  aria-label={volume > 0.01 ? '静音' : '恢复音量'}
-                  className="flex h-7 w-7 shrink-0 items-center justify-center text-white/55 transition-colors hover:text-[#9fe8d0]"
-                >
-                  {volume <= 0.01 ? (
-                    <VolumeX className="h-4 w-4" />
-                  ) : volume < 0.5 ? (
-                    <Volume1 className="h-4 w-4" />
-                  ) : (
-                    <Volume2 className="h-4 w-4" />
-                  )}
-                </button>
-                <input
-                  type="range"
-                  min="0"
-                  max="1"
-                  step="0.01"
-                  value={volume}
-                  onChange={(event) => {
-                    const nextVolume = Number(event.currentTarget.value);
-                    if (nextVolume > 0.01) previousVolumeRef.current = nextVolume;
-                    setVolume(nextVolume);
-                  }}
-                  aria-label="音量"
-                  className="music-volume-slider min-w-0 flex-1"
-                  style={{ '--volume-percent': `${volume * 100}%` } as React.CSSProperties}
-                />
+                {iosVolumeUnsupported ? (
+                  <span className="flex-1 text-center text-[11px] text-white/40">音量请使用系统/耳机控制</span>
+                ) : (
+                  <>
+                    <button
+                      type="button"
+                      onClick={toggleMute}
+                      title={volume > 0.01 ? '静音' : '恢复音量'}
+                      aria-label={volume > 0.01 ? '静音' : '恢复音量'}
+                      className="flex h-7 w-7 shrink-0 items-center justify-center text-white/55 transition-colors hover:text-[#9fe8d0]"
+                    >
+                      {volume <= 0.01 ? (
+                        <VolumeX className="h-4 w-4" />
+                      ) : volume < 0.5 ? (
+                        <Volume1 className="h-4 w-4" />
+                      ) : (
+                        <Volume2 className="h-4 w-4" />
+                      )}
+                    </button>
+                    <input
+                      type="range"
+                      min="0"
+                      max="1"
+                      step="0.01"
+                      value={volume}
+                      onChange={(event) => {
+                        const nextVolume = Number(event.currentTarget.value);
+                        if (nextVolume > 0.01) previousVolumeRef.current = nextVolume;
+                        setVolume(nextVolume);
+                      }}
+                      aria-label="音量"
+                      className="music-volume-slider min-w-0 flex-1"
+                      style={{ '--volume-percent': `${volume * 100}%` } as React.CSSProperties}
+                    />
+                  </>
+                )}
                 <button
                   type="button"
                   role="switch"
@@ -928,6 +978,15 @@ export function MusicPlayer() {
             <span className="pointer-events-none absolute -right-1 -top-1 flex h-4 w-4 items-center justify-center rounded-full bg-[#d7a35b] text-[#050608] shadow">
               <Music2 className="h-2 w-2" />
             </span>
+            {/* 播放失败角标:收起状态下也要能感知到播放异常 */}
+            {urlError ? (
+              <span
+                aria-hidden
+                className="pointer-events-none absolute -left-1 -top-1 flex h-4 w-4 animate-pulse items-center justify-center rounded-full bg-red-500 text-[10px] font-bold leading-none text-white shadow"
+              >
+                !
+              </span>
+            ) : null}
           </motion.button>
         )}
       </AnimatePresence>

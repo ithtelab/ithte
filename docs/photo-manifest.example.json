@@ -1,0 +1,18 @@
+{
+  "_说明": "远程图片清单示例:把本文件内容(去掉 _说明 字段)放到任意可直链的云存储(OSS/COS/R2/七牛/GitHub/网盘直链均可),然后把 JSON 文件的直链地址配置到环境变量 PHOTO_MANIFEST_URL。站点每 60 秒拉取一次,拉取失败自动回退 public/ 本地占位图。数组元素支持纯字符串 URL 或 {url, alt, caption} 对象。",
+  "travel": [
+    { "url": "https://cdn.example.com/travel/mountain.jpg", "alt": "群山与远方" },
+    { "url": "https://cdn.example.com/travel/sunlight.jpg", "alt": "林间日光" },
+    "https://cdn.example.com/travel/autumn.jpg"
+  ],
+  "photo-wall": [
+    { "url": "https://cdn.example.com/wall/01.jpg", "alt": "山顶的日落", "caption": "那天的风很轻" },
+    { "url": "https://cdn.example.com/wall/02.jpg", "alt": "湖边小憩" }
+  ],
+  "milestones": [
+    {
+      "url": "https://cdn.example.com/milestones/01.jpg",
+      "caption": "童年第一个拨号上网的夜晚(带 caption 的照片会覆盖该节点默认文案)"
+    }
+  ]
+}

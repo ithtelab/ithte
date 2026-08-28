@@ -1,5 +1,7 @@
 import DiagonalMarqueeCarousel, { type CardItem } from '@/components/ui/great-ui-diagonal-marquee-carousel';
+import { getPhotos } from '@/utils/photo-manifest';
 
+// 本地兜底默认值:未配置云清单(PHOTO_MANIFEST_URL)或清单暂无 travel 分组时使用
 const travelCards: CardItem[] = [
   { id: 'mountain', url: '/travel/landscape-mountain.png', title: '群山与远方' },
   { id: 'sunlight', url: '/travel/nature-sunlight.png', title: '林间日光' },
@@ -9,7 +11,15 @@ const travelCards: CardItem[] = [
   { id: 'valley', url: '/travel/valley-aerial.png', title: '山谷俯瞰' },
 ];
 
-export function Gallery() {
+export async function Gallery() {
+  const photos = await getPhotos('travel');
+  const cards: CardItem[] = photos.length
+    ? photos.map((photo, index) => ({
+        id: `travel-${index}`,
+        url: photo.url,
+        title: photo.alt || photo.caption || travelCards[index % travelCards.length].title,
+      }))
+    : travelCards;
   return (
     <section id="travel-gallery" data-section className="relative min-h-[100svh] overflow-hidden bg-[#050608]">
       <DiagonalMarqueeCarousel

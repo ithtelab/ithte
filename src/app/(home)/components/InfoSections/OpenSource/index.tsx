@@ -1,11 +1,14 @@
 import { ArrowDown } from 'lucide-react';
 
 import FanCarousel from '@/components/ui/card-fan-carousel';
-import { getLocalPhotos } from '@/utils/local-photos';
+import { getPhotos } from '@/utils/photo-manifest';
 
-export function OpenSource() {
-  const photos = getLocalPhotos('photo-wall');
-  const cards = photos.map((url, index) => ({ imgUrl: url, alt: `黑天鹅的风景收藏 ${index + 1}` }));
+export async function OpenSource() {
+  const photos = await getPhotos('photo-wall');
+  const cards = photos.map((photo, index) => ({
+    imgUrl: photo.url,
+    alt: photo.alt || `黑天鹅的风景收藏 ${index + 1}`,
+  }));
   return (
     <section id="open-source" data-section className="relative min-h-[100svh] overflow-hidden">
       {/* 背景：深色底 + 主题光斑 */}

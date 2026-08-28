@@ -1,5 +1,5 @@
 import CarouselStacked from '@/components/ui/carousel-07';
-import { getLocalPhotos } from '@/utils/local-photos';
+import { getPhotos } from '@/utils/photo-manifest';
 
 const milestoneCopy = [
   {
@@ -34,14 +34,19 @@ const milestoneCopy = [
   },
 ];
 
-export function Milestone() {
-  const photos = getLocalPhotos('milestones');
+export async function Milestone() {
+  const photos = await getPhotos('milestones');
   if (!photos.length) return null;
 
-  const milestones = milestoneCopy.map((item, index) => ({
-    ...item,
-    image: photos[index % photos.length],
-  }));
+  // 清单里带 caption 的照片会覆盖对应节点的文案,让「哪张图配哪段文字」由清单驱动
+  const milestones = milestoneCopy.map((item, index) => {
+    const photo = photos[index % photos.length];
+    return {
+      ...item,
+      description: photo.caption || item.description,
+      image: photo.url,
+    };
+  });
 
   return (
     <section id="milestone" data-section className="relative overflow-hidden px-4 pb-16 pt-20 md:px-8 md:pb-24 md:pt-28">

@@ -43,6 +43,5 @@ next-env.d.ts
 
 .next.zip
 
-# local encrypted music-session key
-/data/.music-session-key
-/data/wall-rate-limits.json
+# 站点运行时数据(留言、限流、加密的音乐账号与密钥)一律不入库,备份交给部署侧脚本
+/data

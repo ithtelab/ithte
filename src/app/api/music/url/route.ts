@@ -2,8 +2,11 @@ import { NextRequest, NextResponse } from 'next/server';
 import { song_url, song_url_v1 } from 'NeteaseCloudMusicApi';
 import type { SoundQualityType } from 'NeteaseCloudMusicApi/interface';
 
+import { withTimeout } from '@/lib/with-timeout';
 import { resolveNeteaseCookie } from '@/lib/music-session';
 import { markServerAccountInvalid } from '@/lib/netease-account';
+import { allowRequestByIp } from '@/utils/rate-limit';
+import { parseSafePublicHttpUrl } from '@/utils/url-guard';
 
 export const runtime = 'nodejs';
 
@@ -14,8 +17,23 @@ const UA =
 const LEVELS = ['exhigh', 'standard'] as const;
 type Level = (typeof LEVELS)[number];
 
-/** HEAD 探测播放地址是否真的能播（网易云偶尔返回 404 占位） */
+// 限流:同 IP 每分钟最多 30 次取地址,防公共代理滥用(与共享账号的封号风险配套)
+const RATE_LIMIT = 30;
+const RATE_LIMIT_WINDOW_MS = 60_000;
+const UPSTREAM_TIMEOUT_MS = 10_000;
+
+/** 网易云 CDN 域名白名单;只允许 https,且 host 必须是 .126.net / .music.126.net 体系 */
+function isNeteaseCdn(url: string): boolean {
+  const parsed = parseSafePublicHttpUrl(url);
+  if (!parsed) return false;
+  if (parsed.protocol !== 'https:') return false;
+  const host = parsed.hostname.toLowerCase();
+  return host === '126.net' || host === 'music.126.net' || host.endsWith('.126.net');
+}
+
+/** HEAD 探测播放地址是否真的能播(网易云偶尔返回 404 占位) */
 async function probeUrl(url: string) {
+  if (!isNeteaseCdn(url)) return { ok: false, status: 0, type: '' };
   try {
     const res = await fetch(url, {
       method: 'HEAD',
@@ -30,10 +48,32 @@ async function probeUrl(url: string) {
   }
 }
 
+interface UrlBody {
+  code?: number;
+  data?: Array<{ url?: string; freeTrialInfo?: unknown; fee?: number }>;
+}
+
+function extractUrl(body: unknown): { url: string; trial: boolean; code: number } {
+  const b = body as UrlBody;
+  const d = Array.isArray(b?.data) ? b.data[0] : undefined;
+  return {
+    url: typeof d?.url === 'string' ? d.url : '',
+    trial: !!(d?.freeTrialInfo),
+    code: Number(b?.code ?? 0),
+  };
+}
+
 export async function GET(req: NextRequest) {
   const id = req.nextUrl.searchParams.get('id');
-  if (!id) {
-    return NextResponse.json({ error: '缺少歌曲 id' }, { status: 400 });
+  if (!id || !Number.isInteger(Number(id)) || Number(id) <= 0) {
+    return NextResponse.json({ error: '缺少有效的歌曲 id' }, { status: 400 });
+  }
+
+  if (!allowRequestByIp(req, 'music:url', RATE_LIMIT, RATE_LIMIT_WINDOW_MS)) {
+    return NextResponse.json(
+      { ok: false, error: '请求过于频繁，请稍后再试', reason: 'rate_limited' },
+      { status: 429 },
+    );
   }
 
   try {
@@ -45,32 +85,41 @@ export async function GET(req: NextRequest) {
 
     for (const level of LEVELS) {
       let url = '';
+      let code = 0;
       try {
-        const r = await song_url_v1({ id: Number(id), level: level as SoundQualityType, cookie: cookie || undefined });
-        const bodyCode = Number((r.body as { code?: number })?.code ?? 0);
-        if (bodyCode === 301) {
-          // 上游明确要求登录:cookie 已失效,换更低音质也无意义,直接跳出
+        const r = await withTimeout(
+          song_url_v1({ id: Number(id), level: level as SoundQualityType, cookie: cookie || undefined }),
+          UPSTREAM_TIMEOUT_MS,
+          'song_url_v1',
+        );
+        const d = extractUrl(r.body);
+        code = d.code;
+        if (code === 301) {
           loginExpired = true;
           break;
         }
-        const d = Array.isArray(r.body?.data) ? r.body.data[0] : undefined;
-        lastData = d ?? lastData;
-        lastTrial = !!(d?.freeTrialInfo);
-        url = typeof d?.url === 'string' ? d.url : '';
+        lastData = { ...(r.body as UrlBody).data?.[0] as Record<string, unknown> ?? {} } as Record<string, unknown>;
+        lastTrial = d.trial;
+        url = d.url;
         lastLevel = level;
       } catch {
-        // v1 失败退回旧接口
+        // v1 失败或超时,退回旧接口
         try {
-          const r = await song_url({ id: Number(id), br: 320000, cookie: cookie || undefined });
-          const bodyCode = Number((r.body as { code?: number })?.code ?? 0);
-          if (bodyCode === 301) {
+          const r = await withTimeout(
+            song_url({ id: Number(id), br: 320000, cookie: cookie || undefined }),
+            UPSTREAM_TIMEOUT_MS,
+            'song_url',
+          );
+          const d = extractUrl(r.body);
+          code = d.code;
+          if (code === 301) {
             loginExpired = true;
             break;
           }
-          const d = Array.isArray(r.body?.data) ? r.body.data[0] : undefined;
-          lastData = d ?? lastData;
-          lastTrial = !!(d?.freeTrialInfo);
-          url = typeof d?.url === 'string' ? d.url : '';
+          const fee = Number((r.body as UrlBody).data?.[0]?.fee ?? 0);
+          lastData = { ...(r.body as UrlBody).data?.[0] as Record<string, unknown> ?? {}, fee } as Record<string, unknown>;
+          lastTrial = d.trial;
+          url = d.url;
           lastLevel = level;
         } catch {
           /* continue */
@@ -88,13 +137,13 @@ export async function GET(req: NextRequest) {
             level,
             trial: false,
             loggedIn: !!cookie,
+            source,
           });
         }
       }
     }
 
-    // cookie 失效:给前端明确的 login_required 信号;服务端内置账号失效要打标记降级,
-    // 避免全站访客反复用失效 cookie 撞上游
+    // cookie 失效:给前端明确的 login_required 信号;服务端内置账号失效要打标记降级
     if (loginExpired) {
       if (source === 'server') {
         markServerAccountInvalid();
@@ -110,8 +159,8 @@ export async function GET(req: NextRequest) {
     }
 
     // 全部失败：按 lastData 分类错误原因
-    const fee = Number(lastData?.fee ?? 0);
-    const code = Number(lastData?.code ?? 0);
+    const fee = Number((lastData as { fee?: number })?.fee ?? 0);
+    const code = Number((lastData as { code?: number })?.code ?? 0);
     const loggedIn = !!cookie;
 
     if (lastTrial && !loggedIn) {
@@ -150,7 +199,7 @@ export async function GET(req: NextRequest) {
     );
   } catch (err) {
     return NextResponse.json(
-      { ok: false, error: err instanceof Error ? err.message : String(err) },
+      { ok: false, error: '播放地址获取失败，请稍后重试', reason: 'internal_error' },
       { status: 500 },
     );
   }

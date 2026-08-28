@@ -2,9 +2,18 @@ import { NextRequest, NextResponse } from 'next/server';
 import { lyric_new } from 'NeteaseCloudMusicApi';
 
 import type { LyricLine, LyricWord } from '@/components/music-player/netease';
+import { withTimeout } from '@/lib/with-timeout';
+import { cached } from '@/lib/cache';
 import { getNeteaseCookie } from '@/lib/music-session';
+import { allowRequestByIp } from '@/utils/rate-limit';
 
 export const runtime = 'nodejs';
+
+// 歌词基本不变,缓存 1 小时;限流防批量拉取
+const LYRIC_CACHE_TTL_MS = 60 * 60_000;
+const RATE_LIMIT = 30;
+const RATE_LIMIT_WINDOW_MS = 60_000;
+const UPSTREAM_TIMEOUT_MS = 10_000;
 
 const CREDIT_LINE_PATTERN = /^(?:作词|作曲|编曲|制作人|监制|混音|母带|录音|吉他|贝斯|鼓|和声|弦乐|人声编辑|制作|出品|发行|统筹|艺术总监|特别鸣谢|OP|SP|lyrics?\s+by|composed\s+by|arranged\s+by|produc(?:er|ed\s+by)|mixed\s+by|mastered\s+by)\s*[:：]/i;
 
@@ -74,37 +83,47 @@ const mergeTranslation = (main: LyricLine[], trans: LyricLine[]): LyricLine[] =>
 
 export async function GET(req: NextRequest) {
   const id = req.nextUrl.searchParams.get('id');
-  if (!id) {
-    return NextResponse.json({ error: '缺少歌曲 id' }, { status: 400 });
+  if (!id || !Number.isInteger(Number(id)) || Number(id) <= 0) {
+    return NextResponse.json({ ok: false, error: '缺少有效的歌曲 id' }, { status: 400 });
+  }
+
+  if (!allowRequestByIp(req, 'music:lyric', RATE_LIMIT, RATE_LIMIT_WINDOW_MS)) {
+    return NextResponse.json({ ok: false, error: '请求过于频繁，请稍后再试' }, { status: 429 });
   }
 
   try {
     const cookie = getNeteaseCookie(req);
-    const r = await lyric_new({ id: Number(id), cookie: cookie || undefined });
-    const body = r.body as unknown as {
-      lrc?: { lyric?: string };
-      yrc?: { lyric?: string };
-      tlyric?: { lyric?: string };
-    };
-    const raw = body.lrc?.lyric ?? '';
-    const wordRaw = body.yrc?.lyric ?? '';
-    if (!raw && !wordRaw) {
-      return NextResponse.json({ ok: false, error: '该歌曲暂无歌词' }, { status: 404 });
-    }
+    const lines = await cached(`lyric:${id}`, LYRIC_CACHE_TTL_MS, async () => {
+      const r = await withTimeout(
+        lyric_new({ id: Number(id), cookie: cookie || undefined }),
+        UPSTREAM_TIMEOUT_MS,
+        'lyric_new',
+      );
+      const body = r.body as unknown as {
+        lrc?: { lyric?: string };
+        yrc?: { lyric?: string };
+        tlyric?: { lyric?: string };
+      };
+      const raw = body.lrc?.lyric ?? '';
+      const wordRaw = body.yrc?.lyric ?? '';
+      if (!raw && !wordRaw) {
+        throw { noLyric: true };
+      }
 
-    const wordLyrics = wordRaw ? parseYrc(wordRaw) : [];
-    const main = (wordLyrics.length ? wordLyrics : parseLrc(raw)).filter(
-      (line) => !isCreditLine(line.text),
-    );
-    const transRaw = body.tlyric?.lyric ?? '';
-    const trans = transRaw ? parseLrc(transRaw) : [];
-    const lines = mergeTranslation(main, trans);
+      const wordLyrics = wordRaw ? parseYrc(wordRaw) : [];
+      const main = (wordLyrics.length ? wordLyrics : parseLrc(raw)).filter(
+        (line) => !isCreditLine(line.text),
+      );
+      const transRaw = body.tlyric?.lyric ?? '';
+      const trans = transRaw ? parseLrc(transRaw) : [];
+      return mergeTranslation(main, trans);
+    });
 
     return NextResponse.json({ ok: true, lines });
   } catch (err) {
-    return NextResponse.json(
-      { ok: false, error: err instanceof Error ? err.message : String(err) },
-      { status: 500 },
-    );
+    if ((err as { noLyric?: boolean }).noLyric) {
+      return NextResponse.json({ ok: false, error: '该歌曲暂无歌词' }, { status: 404 });
+    }
+    return NextResponse.json({ ok: false, error: '歌词加载失败，请稍后重试' }, { status: 500 });
   }
 }

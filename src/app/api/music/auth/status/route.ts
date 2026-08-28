@@ -3,8 +3,13 @@ import { login_status } from 'NeteaseCloudMusicApi';
 
 import { clearNeteaseSession, resolveNeteaseCookie } from '@/lib/music-session';
 import { markServerAccountInvalid } from '@/lib/netease-account';
+import { allowRequestByIp } from '@/utils/rate-limit';
 
 export const runtime = 'nodejs';
+
+// 限流:同 IP 每分钟最多 60 次查询登录态(访客每小时只在进入页面时查一次,足够宽裕)
+const RATE_LIMIT = 60;
+const RATE_LIMIT_WINDOW_MS = 60_000;
 
 // login_status 有真实网络开销,60 秒内存缓存内的重复查询直接复用
 let statusCache: { at: number; loggedIn: boolean; profile: StatusProfile | null } | null = null;
@@ -32,6 +37,9 @@ async function queryLoginStatus(cookie: string) {
 }
 
 export async function GET(request: NextRequest) {
+  if (!allowRequestByIp(request, 'music:status', RATE_LIMIT, RATE_LIMIT_WINDOW_MS)) {
+    return NextResponse.json({ ok: true, loggedIn: false, source: 'anonymous', profile: null }, { status: 429 });
+  }
   // 全链路判定:访客会话 / 服务端内置账号 / 环境变量都算登录态,
   // 与实际取歌能力(getNeteaseCookie)保持一致,而不是只看浏览器有没有会话
   const { cookie, source } = resolveNeteaseCookie(request);

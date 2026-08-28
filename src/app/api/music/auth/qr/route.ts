@@ -5,8 +5,13 @@ import { login_qr_check, login_qr_create, login_qr_key, login_status } from 'Net
 
 import { sanitizeNeteaseCookie, setNeteaseSession } from '@/lib/music-session';
 import { saveServerAccount } from '@/lib/netease-account';
+import { allowRequestByIp } from '@/utils/rate-limit';
 
 export const runtime = 'nodejs';
+
+// 限流:同 IP 每分钟最多 20 次扫码相关操作(create/check 合计),防脚本滥用
+const RATE_LIMIT = 20;
+const RATE_LIMIT_WINDOW_MS = 60_000;
 
 type QrAction = { action?: 'create' | 'check'; key?: string; adminToken?: string };
 
@@ -31,6 +36,9 @@ function profileFrom(body: unknown) {
 }
 
 export async function POST(request: NextRequest) {
+  if (!allowRequestByIp(request, 'music:qr', RATE_LIMIT, RATE_LIMIT_WINDOW_MS)) {
+    return NextResponse.json({ ok: false, error: '请求过于频繁，请稍后再试' }, { status: 429 });
+  }
   try {
     const payload = (await request.json()) as QrAction;
 

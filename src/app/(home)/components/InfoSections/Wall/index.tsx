@@ -139,7 +139,7 @@ export function Wall({ walls }: { walls: Wall[] }) {
       </form>
 
       <div data-reveal className="w-full py-5 md:py-6">
-        {items.length && useMarquee ? (
+        {items.length > 0 && useMarquee ? (
           <div className="relative h-[min(64vh,660px)] min-h-[440px] w-full overflow-hidden [mask-image:linear-gradient(90deg,transparent,#000_6%,#000_94%,transparent)]">
             <div className="flex h-full w-full flex-col justify-between py-1">
               {wallRows.map((row, rowIndex) => {

@@ -1,17 +1,24 @@
-import { mkdir, readFile, writeFile } from 'node:fs/promises';
+import { mkdir } from 'node:fs/promises';
 import { createHash } from 'node:crypto';
 import path from 'node:path';
 
 import type { Wall } from '@/types/wall';
+import { atomicWriteFile, readFileWithBackup } from '@/lib/atomic-file';
+import { dataFilePath } from '@/lib/site-data';
 
-const dataDirectory = process.env.SITE_DATA_DIR
-  ? path.resolve(process.env.SITE_DATA_DIR)
-  : path.join(process.cwd(), 'data');
-const wallFile = path.join(dataDirectory, 'walls.json');
-const rateLimitFile = path.join(dataDirectory, 'wall-rate-limits.json');
+const wallFile = dataFilePath('walls.json');
+const archiveFile = dataFilePath('walls-archive.json');
+const wallDir = path.dirname(wallFile);
 
+// 保留最新 500 条;超出部分归档,不直接丢弃
+const MAX_WALLS = 500;
+const ARCHIVE_MAX_WALLS = 5000;
+
+// 进程内串行化写队列,避免并发写互相覆盖
 let writeQueue: Promise<void> = Promise.resolve();
-let rateLimitQueue: Promise<void> = Promise.resolve();
+// 留言限流改为内存滑动窗口实现(单一实例),不再落盘,消除写放大源
+const RATE_LIMIT_WINDOW_MS = 30_000;
+const rateLimitMap = new Map<string, number>();
 
 function isWall(value: unknown): value is Wall {
   if (!value || typeof value !== 'object') return false;
@@ -25,14 +32,34 @@ function isWall(value: unknown): value is Wall {
   );
 }
 
-export async function readWalls() {
+function normalizeWalls(raw: string): Wall[] {
   try {
-    const raw = await readFile(wallFile, 'utf8');
     const parsed: unknown = JSON.parse(raw);
     if (!Array.isArray(parsed)) return [];
     return parsed.filter(isWall).sort((a, b) => b.createTime - a.createTime);
   } catch {
     return [];
+  }
+}
+
+export async function readWalls() {
+  // 主文件损坏时回退 .bak
+  const raw = readFileWithBackup(wallFile);
+  if (!raw) return [];
+  return normalizeWalls(raw);
+}
+
+/** 把超出的留言追加到归档文件(保留最近 N 条),失败不阻塞主流程 */
+async function appendArchive(overflow: Wall[]) {
+  if (!overflow.length) return;
+  try {
+    const existing = readFileWithBackup(archiveFile);
+    let archived: Wall[] = existing ? normalizeWalls(existing) : [];
+    archived = [...overflow, ...archived].slice(0, ARCHIVE_MAX_WALLS);
+    await mkdir(wallDir, { recursive: true });
+    atomicWriteFile(archiveFile, `${JSON.stringify(archived, null, 2)}\n`, { backup: true });
+  } catch {
+    /* archive 失败不影响留言保存 */
   }
 }
 
@@ -52,42 +79,46 @@ export async function createWall(input: Pick<Wall, 'name' | 'content' | 'color'>
 
   writeQueue = writeQueue.catch(() => undefined).then(async () => {
     const walls = await readWalls();
-    await mkdir(dataDirectory, { recursive: true });
-    await writeFile(wallFile, `${JSON.stringify([wall, ...walls].slice(0, 500), null, 2)}\n`, 'utf8');
+    const next = [wall, ...walls];
+    const overflow = next.length > MAX_WALLS ? next.slice(MAX_WALLS) : [];
+    const keep = next.slice(0, MAX_WALLS);
+    await mkdir(wallDir, { recursive: true });
+    // 原子写 + 保留 .bak,崩溃不会清零
+    atomicWriteFile(wallFile, `${JSON.stringify(keep, null, 2)}\n`, { backup: true });
+    await appendArchive(overflow);
   });
 
   await writeQueue;
   return wall;
 }
 
-export async function consumeWallRateLimit(clientKey: string, windowMs: number) {
-  let allowed = false;
-  rateLimitQueue = rateLimitQueue.catch(() => undefined).then(async () => {
-    const now = Date.now();
-    const key = createHash('sha256').update(clientKey).digest('hex');
-    let entries: Record<string, number> = {};
-
-    try {
-      const raw = await readFile(rateLimitFile, 'utf8');
-      const parsed: unknown = JSON.parse(raw);
-      if (parsed && typeof parsed === 'object' && !Array.isArray(parsed)) {
-        entries = Object.fromEntries(
-          Object.entries(parsed as Record<string, unknown>)
-            .filter((entry): entry is [string, number] => typeof entry[1] === 'number' && now - entry[1] < windowMs * 4),
-        );
-      }
-    } catch {
-      entries = {};
-    }
-
-    const previous = entries[key] ?? 0;
-    allowed = now - previous >= windowMs;
-    if (allowed) entries[key] = now;
-
-    await mkdir(dataDirectory, { recursive: true });
-    await writeFile(rateLimitFile, `${JSON.stringify(entries, null, 2)}\n`, 'utf8');
+export async function deleteWall(id: number) {
+  let removed: Wall | null = null;
+  writeQueue = writeQueue.catch(() => undefined).then(async () => {
+    const walls = await readWalls();
+    const next = walls.filter((wall) => wall.id !== id);
+    if (next.length === walls.length) return;
+    removed = walls.find((wall) => wall.id === id) ?? null;
+    await mkdir(wallDir, { recursive: true });
+    atomicWriteFile(wallFile, `${JSON.stringify(next, null, 2)}\n`, { backup: true });
   });
+  await writeQueue;
+  return removed;
+}
 
-  await rateLimitQueue;
+/** 进程内滑动窗口限流(单一实例实现) */
+export async function consumeWallRateLimit(clientKey: string, windowMs: number) {
+  await writeQueue.catch(() => undefined);
+  const now = Date.now();
+  const key = createHash('sha256').update(clientKey).digest('hex');
+  // 定期清理过期 key,防止内存膨胀
+  if (rateLimitMap.size > 5000) {
+    for (const [k, t] of rateLimitMap) {
+      if (now - t > windowMs * 4) rateLimitMap.delete(k);
+    }
+  }
+  const previous = rateLimitMap.get(key) ?? 0;
+  const allowed = now - previous >= windowMs;
+  if (allowed) rateLimitMap.set(key, now);
   return allowed;
 }

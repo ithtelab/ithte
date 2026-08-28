@@ -201,8 +201,24 @@ node .next/standalone/server.js
 - 生产环境建议使用 Node.js 20 或更高版本；
 - 将 `PORT` 设置为实际开放的端口；
 - 通过反向代理绑定自己的域名；
-- 定期备份 `data` 目录中的站点数据；
+- 定期备份 `data` 目录中的站点数据（建议先跑一次 `./scripts/backup-walls.sh`，再放进 cron：`0 3 * * * /path/to/ithte/scripts/backup-walls.sh >> /var/log/ithte-backup.log 2>&1`）；
 - 发布前替换个人头像、联系方式、歌单和照片资源。
+
+### 留言管理
+
+配置 `ADMIN_TOKEN` 后可用它调用管理接口（**不会**在前端展示，建议用 curl 等脚本）：
+
+```bash
+# 删除一条留言(需先在环境变量配置 ADMIN_TOKEN)
+curl -X DELETE -H "Authorization: Bearer $ADMIN_TOKEN" "https://your-site.com/api/wall?id=123"
+
+# 分页查看全量留言
+curl -H "Authorization: Bearer $ADMIN_TOKEN" "https://your-site.com/api/wall?page=1&pageSize=50"
+```
+
+> 说明：`ADMIN_TOKEN` 同时用于 `/admin` 页面的网易云扫码登录，便于站长把账号写入服务端实现全站共享。数据仅支持单实例运行（JSON 文件 + 进程内缓存），扩容需先迁移到数据库。
+
+> 留言墙数据默认保留最近 500 条，超出部分自动归档到 `data/walls-archive.json`（保留最近 5000 条），不会直接丢弃。
 
 ## 项目结构
 

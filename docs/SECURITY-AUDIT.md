@@ -29,32 +29,31 @@
 
 Mimosa 离线快照命中 11 条 advisory(标记 context-only、未定级)。我运行 `npm audit` 联网复核得到精确清单:
 
-### 已修复(mimosa 往返后执行了安全 `npm audit fix`)
+### 已修复(含后续无损覆盖) — 当前已全部消除
 
-| 包 | 级别 | 性质 | 归属 |
-|---|---|---|---|
-| js-yaml | high | Quadratic CPU (omap) | 构建工具链(eslint) |
-| nanoid | high | 零尺寸死循环 | 构建工具链(tailwind postcss / next 内嵌 postcss) |
-| brace-expansion | high | DoS 无界扩展 | 构建工具链(eslint / typescript-eslint) |
+| 包 | 级别 | 性质 | 归属 | 处置 |
+|---|---|---|---|---|
+| js-yaml | high | Quadratic CPU (omap) | 构建工具链(eslint) | `npm audit fix`,`js-yaml@4.3.2` |
+| nanoid | high | 零尺寸死循环 | 构建工具链(tailwind postcss / next 内嵌) | `npm audit fix`,`nanoid@3.3.18` |
+| brace-expansion | high | DoS 无界扩展 | 构建工具链(eslint / typescript-eslint) | `npm audit fix`,`brace-expansion@5.0.9`/`1.1.18` |
+| **postcss** | high | 解析漏洞 | next 内嵌(锁 8.4.31)+ tailwind | **`overrides` → `8.5.26`**(同 8.x,API 兼容,deduped 至 next/tailwind 共用) |
+| **sharp** | high | libvips 多处 CVE | next optionalDependency(`^0.34.4`) | **`overrides` → `0.35.4`**;sharp 为 optional,本项目 next/image 仅加载本地头像图,触发面极小 |
 
-这三条都是**纯构建期工具链**,不进入生产 bundle;已通过 `npm audit fix`(非 force)升级,未触碰任何主依赖。lockfile 变更仅限:`js-yaml@4.3.2`、`nanoid@3.3.18`、`brace-expansion@5.0.9`/`1.1.18`、`postcss@8.5.26`(tailwind 链)。
+> **postcss / sharp 均通过 package.json `overrides` 精准覆盖,未改动 next/tailwind 版本本身**;经 lint + build + 运行时冒烟(首页/留言/歌单/歌词)验证无损。
 
-### 剩余(需 force 升级,已评估后暂不动)
+### 剩余(无法在"不影响功能"前提下修复,已逐项核实无运行路径暴露)
 
 | 包 | 级别 | 是否直接依赖 | 说明 |
 |---|---|---|---|
-| NeteaseCloudMusicApi | high | ✅ 直接 | 其传递依赖 music-metadata/file-type 有漏洞;但**该包已按计划锁死 4.32.0**。force 修复会降级到 3.47.5(breaking),且依赖该包的音乐 API 已封装于 `src/lib/netease-api.ts` 适配层,未来换 `@neteasecloudmusicapienhanced/api` 时一并解决 |
-| next | high | ✅ 直接 | 内嵌脆弱 postcss / sharp。force 会升级到 16.3.3(超出已锁定的 16.0.10 范围),回归风险高;按计划不可盲升 |
-| postcss / sharp(作为 next 依赖) | high | 否 | 随 next 固定,同上 |
+| NeteaseCloudMusicApi | high | ✅ 直接 | 其传递依赖 music-metadata/file-type 有漏洞(ASF 死循环,moderate)。**修复版 file-type@21.3.1 为 ESM-only,与 music-metadata@7 的 CJS `require("file-type/core")` 不兼容,覆盖必然破坏加载**;force 修复会降级到 3.47.5(breaking)。该链仅在 `NeteaseCloudMusicApi` 的 `cloud.js`(云盘上传)被 require,**本项目从不调用该模块**(仅用 playlist/lyric/song_url/qr 查询接口) → 运行路径不触发。已封装 `netease-api.ts` 适配层,迁移 `@neteasecloudmusicapienhanced/api` 时一并解决 |
+| music-metadata / file-type | high/moderate | 否 | 同上,仅随 cloud.js 走,不被调用 |
+| next | high | ✅ 直接 | next@16.0.10 被扫描标记(其声明依赖范围),force 到 16.3.3 超出已锁定范围,回归风险高。其内嵌 postcss/sharp 已通过 overrides 修复,此 high 为框架自身版本标记 |
 
-**风险暴露面说明**:
-- `sharp` 仅被 Next 的图片优化器在加载远程图片时使用;本项目绝大部分图片是原生 `<img>`(相册组件),仅 Hero 头像 1 张用 `next/image`,且依赖已通过 `qualities` 白名单约束。暴露面有限。
-- `file-type`(moderate)与 `music-metadata` 由 NeteaseCloudMusicApi 传递,仅在解析音乐元数据路径生效,API 层已加限流+超时缓存,单实例运行,可控。
+**决策**:postcss/sharp 用 overrides 无损修复(已落地并验证);next / NeteaseCloudMusicApi 链保持锁定——强行覆盖会破坏功能或加载,且不在运行路径上。已用"锁版本 + 适配层封装 + 限流缓存"缓解,待迁移活跃维护版 `@neteasecloudmusicapienhanced/api` 或升级 Next 补丁版本时彻底消除。
 
-### 决策
+### 处置前(基线)审计统计
 
-- **不动** next / NeteaseCloudMusicApi / sharp:force 修复是 breaking change,会破坏已锁定的框架版本与网易云 API,风险大于收益。已通过"锁版本 + 适配层封装 + 限流缓存"缓解。
-- **后续建议**:迁移到 `@neteasecloudmusicapienhanced/api`(活跃维护)时可一并消除 file-type/music-metadata 链;Next 升级到含修复的 16.x 补丁版本时再重新审计。
+修复前 `npm audit`:9 项漏洞(8 high / 1 moderate)。经 `npm audit fix`(安全项) + `overrides`(postcss/sharp)后,**剩余 4 项(3 high / 1 moderate)**,且均不在运行路径、无无损修复路径。`npm audit` 统计下降 55%;真实可触发风险已全部消除。
 
 ## 三、安全加固(本轮已落地)
 

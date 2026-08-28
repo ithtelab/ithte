@@ -2,7 +2,8 @@ import { NextRequest, NextResponse } from 'next/server';
 import { song_url, song_url_v1 } from 'NeteaseCloudMusicApi';
 import type { SoundQualityType } from 'NeteaseCloudMusicApi/interface';
 
-import { getNeteaseCookie } from '@/lib/music-session';
+import { resolveNeteaseCookie } from '@/lib/music-session';
+import { markServerAccountInvalid } from '@/lib/netease-account';
 
 export const runtime = 'nodejs';
 
@@ -36,15 +37,22 @@ export async function GET(req: NextRequest) {
   }
 
   try {
-    const cookie = getNeteaseCookie(req);
+    const { cookie, source } = resolveNeteaseCookie(req);
     let lastData: Record<string, unknown> | null = null;
     let lastTrial = false;
     let lastLevel = '';
+    let loginExpired = false;
 
     for (const level of LEVELS) {
       let url = '';
       try {
         const r = await song_url_v1({ id: Number(id), level: level as SoundQualityType, cookie: cookie || undefined });
+        const bodyCode = Number((r.body as { code?: number })?.code ?? 0);
+        if (bodyCode === 301) {
+          // 上游明确要求登录:cookie 已失效,换更低音质也无意义,直接跳出
+          loginExpired = true;
+          break;
+        }
         const d = Array.isArray(r.body?.data) ? r.body.data[0] : undefined;
         lastData = d ?? lastData;
         lastTrial = !!(d?.freeTrialInfo);
@@ -54,6 +62,11 @@ export async function GET(req: NextRequest) {
         // v1 失败退回旧接口
         try {
           const r = await song_url({ id: Number(id), br: 320000, cookie: cookie || undefined });
+          const bodyCode = Number((r.body as { code?: number })?.code ?? 0);
+          if (bodyCode === 301) {
+            loginExpired = true;
+            break;
+          }
           const d = Array.isArray(r.body?.data) ? r.body.data[0] : undefined;
           lastData = d ?? lastData;
           lastTrial = !!(d?.freeTrialInfo);
@@ -78,6 +91,22 @@ export async function GET(req: NextRequest) {
           });
         }
       }
+    }
+
+    // cookie 失效:给前端明确的 login_required 信号;服务端内置账号失效要打标记降级,
+    // 避免全站访客反复用失效 cookie 撞上游
+    if (loginExpired) {
+      if (source === 'server') {
+        markServerAccountInvalid();
+        return NextResponse.json(
+          { ok: false, error: '站点内置网易云账号登录已失效，请联系站长重新扫码', reason: 'login_required', source },
+          { status: 403 },
+        );
+      }
+      return NextResponse.json(
+        { ok: false, error: '网易云登录已过期，请重新扫码登录', reason: 'login_required', source },
+        { status: 403 },
+      );
     }
 
     // 全部失败：按 lastData 分类错误原因

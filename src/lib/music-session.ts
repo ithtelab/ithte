@@ -1,107 +1,50 @@
-import { createCipheriv, createDecipheriv, createHash, randomBytes } from 'node:crypto';
-import { mkdirSync, readFileSync, writeFileSync } from 'node:fs';
-import path from 'node:path';
-
 import type { NextRequest, NextResponse } from 'next/server';
+
+import {
+  sanitizeNeteaseCookie,
+  sealCookie,
+  unsealCookie,
+} from '@/lib/netease-crypto';
+import { getServerAccountCookie } from '@/lib/netease-account';
 
 const SESSION_COOKIE = 'yuniao_netease_session';
 const COOKIE_MAX_AGE = 60 * 60 * 24 * 30;
-const COOKIE_NAMES = new Set([
-  'MUSIC_U',
-  'MUSIC_A',
-  '__csrf',
-  'NMTID',
-  'WEVNSM',
-  'JSESSIONID-WYYY',
-  'os',
-  'appver',
-]);
 
-let cachedKey: Buffer | null = null;
+export { sanitizeNeteaseCookie };
 
-function getSessionKey() {
-  if (cachedKey) return cachedKey;
+export type NeteaseCookieSource = 'browser' | 'server' | 'env' | 'anonymous';
 
-  const configured = process.env.MUSIC_SESSION_SECRET?.trim();
-  if (configured) {
-    cachedKey = createHash('sha256').update(configured).digest();
-    return cachedKey;
-  }
+/**
+ * 解析本次请求可用的网易云 cookie:
+ * 访客自己的浏览器会话 > 服务端内置账号 > NETEASE_COOKIE 环境变量 > 匿名。
+ */
+export function resolveNeteaseCookie(request: NextRequest): { cookie: string; source: NeteaseCookieSource } {
+  const sessionCookie = request.cookies.get(SESSION_COOKIE)?.value;
+  const decrypted = sessionCookie ? unsealCookie(sessionCookie) : '';
+  if (decrypted) return { cookie: decrypted, source: 'browser' };
 
-  const dataDir = process.env.SITE_DATA_DIR || path.join(process.cwd(), 'data');
-  const keyFile = path.join(dataDir, '.music-session-key');
-  mkdirSync(dataDir, { recursive: true });
+  const serverCookie = getServerAccountCookie();
+  if (serverCookie) return { cookie: serverCookie, source: 'server' };
 
-  try {
-    const existing = readFileSync(keyFile);
-    if (existing.length === 32) {
-      cachedKey = existing;
-      return cachedKey;
-    }
-  } catch {
-    /* create below */
-  }
+  const envCookie = process.env.NETEASE_COOKIE?.trim() || '';
+  if (envCookie) return { cookie: envCookie, source: 'env' };
 
-  const generated = randomBytes(32);
-  try {
-    writeFileSync(keyFile, generated, { flag: 'wx' });
-    cachedKey = generated;
-  } catch {
-    cachedKey = readFileSync(keyFile);
-  }
-  return cachedKey;
-}
-
-export function sanitizeNeteaseCookie(rawCookie: string) {
-  const selected = new Map<string, string>();
-  for (const segment of String(rawCookie || '').split(';')) {
-    const index = segment.indexOf('=');
-    if (index <= 0) continue;
-    const name = segment.slice(0, index).trim();
-    const value = segment.slice(index + 1).trim();
-    if (COOKIE_NAMES.has(name) && value) selected.set(name, value);
-  }
-  return Array.from(selected, ([name, value]) => `${name}=${value}`).join('; ');
-}
-
-function seal(rawCookie: string) {
-  const iv = randomBytes(12);
-  const cipher = createCipheriv('aes-256-gcm', getSessionKey(), iv);
-  const encrypted = Buffer.concat([cipher.update(rawCookie, 'utf8'), cipher.final()]);
-  const tag = cipher.getAuthTag();
-  return `${iv.toString('base64url')}.${tag.toString('base64url')}.${encrypted.toString('base64url')}`;
-}
-
-function unseal(token: string) {
-  try {
-    const [ivPart, tagPart, encryptedPart] = token.split('.');
-    if (!ivPart || !tagPart || !encryptedPart) return '';
-    const decipher = createDecipheriv('aes-256-gcm', getSessionKey(), Buffer.from(ivPart, 'base64url'));
-    decipher.setAuthTag(Buffer.from(tagPart, 'base64url'));
-    return Buffer.concat([
-      decipher.update(Buffer.from(encryptedPart, 'base64url')),
-      decipher.final(),
-    ]).toString('utf8');
-  } catch {
-    return '';
-  }
+  return { cookie: '', source: 'anonymous' };
 }
 
 export function getNeteaseCookie(request: NextRequest) {
-  const sessionCookie = request.cookies.get(SESSION_COOKIE)?.value;
-  const decrypted = sessionCookie ? unseal(sessionCookie) : '';
-  return decrypted || process.env.NETEASE_COOKIE || '';
+  return resolveNeteaseCookie(request).cookie;
 }
 
 export function hasBrowserNeteaseSession(request: NextRequest) {
   const sessionCookie = request.cookies.get(SESSION_COOKIE)?.value;
-  return !!(sessionCookie && unseal(sessionCookie));
+  return !!(sessionCookie && unsealCookie(sessionCookie));
 }
 
 export function setNeteaseSession(response: NextResponse, rawCookie: string) {
   const cookie = sanitizeNeteaseCookie(rawCookie);
   if (!/(?:^|;\s*)MUSIC_U=/.test(cookie)) return false;
-  response.cookies.set(SESSION_COOKIE, seal(cookie), {
+  response.cookies.set(SESSION_COOKIE, sealCookie(cookie), {
     httpOnly: true,
     sameSite: 'lax',
     secure: process.env.NODE_ENV === 'production',

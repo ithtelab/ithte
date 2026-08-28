@@ -12,8 +12,20 @@ function copy(src, dest) {
 }
 
 const standalone = '.next/standalone';
-if (!existsSync(standalone)) process.exit(0);
+const staticDir = '.next/static';
 
-copy('.next/static', join(standalone, '.next/static'));
+// 产物不完整时必须让构建失败(CI 依赖非零退出码发现问题),不能静默成功
+if (!existsSync(standalone)) {
+  console.error('[copy-standalone-assets] .next/standalone 不存在,请先运行 npm run build');
+  process.exit(1);
+}
+if (!existsSync(staticDir)) {
+  console.error('[copy-standalone-assets] .next/static 不存在,构建产物不完整');
+  process.exit(1);
+}
+
+copy(staticDir, join(standalone, '.next/static'));
 if (existsSync('public')) copy('public', join(standalone, 'public'));
 if (existsSync('data')) copy('data', join(standalone, 'data'));
+
+console.log('[copy-standalone-assets] static/public/data 已同步到 .next/standalone');

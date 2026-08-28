@@ -63,8 +63,9 @@ export function SectionNav() {
     <>
       <nav aria-label="页面章节" className="fixed inset-x-0 top-0 z-50 h-1 bg-black/25 backdrop-blur-sm md:hidden">
         <span className="absolute inset-y-0 left-0 bg-[#9fe8d0] shadow-[0_0_12px_rgba(159,232,208,0.7)]" style={{ width: `${progress * 100}%` }} />
-        <div className="absolute inset-x-0 top-0 grid h-4" style={{ gridTemplateColumns: `repeat(${sections.length},1fr)` }}>
-          {sections.map(({ id, label }) => <a key={id} href={`#${id}`} aria-label={`前往${label}`} />)}
+        {/* 点击热区:垫到 24px 高,避免误触后跳到顶部;链接透明不可见 */}
+        <div className="absolute inset-x-0 -top-2.5 grid h-10" style={{ gridTemplateColumns: `repeat(${sections.length},1fr)` }}>
+          {sections.map(({ id, label }) => <a key={id} href={`#${id}`} aria-label={`前往${label}`} className="flex h-full items-center justify-center" />)}
         </div>
       </nav>
 

@@ -1,0 +1,24 @@
+# 数据目录与备份不在镜像内,用 volume 持久化
+# docker compose up -d
+services:
+  web:
+    build: .
+    image: ithte:latest
+    container_name: ithte
+    restart: unless-stopped
+    ports:
+      - "3000:3000"
+    environment:
+      - PORT=3000
+      - NETEASE_COOKIE=${NETEASE_COOKIE:-}
+      - MUSIC_SESSION_SECRET=${MUSIC_SESSION_SECRET:-}
+      - SITE_DATA_DIR=/app/data
+      - WALL_BLOCKED_WORDS=${WALL_BLOCKED_WORDS:-}
+      - ADMIN_TOKEN=${ADMIN_TOKEN:-}
+      - PHOTO_MANIFEST_URL=${PHOTO_MANIFEST_URL:-}
+      - NEXT_PUBLIC_SITE_URL=${NEXT_PUBLIC_SITE_URL:-}
+      - TRUST_PROXY_DEPTH=${TRUST_PROXY_DEPTH:-1}
+    env_file:
+      - .env
+    volumes:
+      - ./data:/app/data

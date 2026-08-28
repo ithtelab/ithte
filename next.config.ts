@@ -8,9 +8,11 @@ const nextConfig: NextConfig = {
         root: __dirname,
     },
     images: {
+        // 图片可能来自云存储清单(PHOTO_MANIFEST_URL)指定的任意 https CDN,
+        // 故放行所有 https 域名(仅 https,不放行 http),供 next/image 优化。
+        // 若希望进一步收敛,可改为明确的图床域名白名单。
         remotePatterns: [
             { protocol: 'https', hostname: '**' },
-            { protocol: 'http', hostname: '**' },
         ],
         qualities: [75, 90],
     },

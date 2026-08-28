@@ -11,10 +11,10 @@ import { AvatarMusicGlow } from './avatar-music-glow';
 const socialPlatforms = [
   { src: '/social/qq.png', label: 'QQ 26677960', href: 'https://wpa.qq.com/msgrd?v=3&uin=26677960&site=qq&menu=yes', band: 'bass', glow: 'rgba(18, 183, 245, 0.58)', invert: false, angle: -90, mobileRadius: 9.4, desktopRadius: 13, size: 'large' },
   { src: '/social/douyin.svg', label: '抖音 ithte', href: 'https://www.douyin.com/user/MS4wLjABAAAAOcT6giaRT5996nn3HCGW-MpwnTo66LrKwCmXVVXMzik', band: 'mid', glow: 'rgba(37, 244, 238, 0.52)', invert: false, angle: -18, mobileRadius: 7.7, desktopRadius: 10.3, size: 'small' },
-  { src: '/social/bilibili.svg', label: '哔哩哔哩', href: '#', band: 'mid', glow: 'rgba(0, 174, 236, 0.58)', invert: false, angle: 39, mobileRadius: 9, desktopRadius: 12, size: 'medium' },
+  { src: '/social/bilibili.svg', label: '哔哩哔哩', href: '', band: 'mid', glow: 'rgba(0, 174, 236, 0.58)', invert: false, angle: 39, mobileRadius: 9, desktopRadius: 12, size: 'medium' },
   { src: '/social/github.svg', label: 'GitHub', href: 'https://github.com/ithtelab/ithte', band: 'high', glow: 'rgba(240, 246, 252, 0.46)', invert: true, angle: 108, mobileRadius: 8, desktopRadius: 10.8, size: 'small' },
-  { src: '/social/netease-cloud-music.svg', label: '网易云音乐', href: '#', band: 'bass', glow: 'rgba(230, 0, 38, 0.54)', invert: false, angle: 164, mobileRadius: 9.3, desktopRadius: 12.7, size: 'medium' },
-  { src: '/social/weibo.svg', label: '微博', href: '#', band: 'high', glow: 'rgba(255, 130, 0, 0.56)', invert: false, angle: 216, mobileRadius: 7.8, desktopRadius: 10.5, size: 'small' },
+  { src: '/social/netease-cloud-music.svg', label: '网易云音乐', href: 'https://music.163.com/#/playlist?id=2493476540', band: 'bass', glow: 'rgba(230, 0, 38, 0.54)', invert: false, angle: 164, mobileRadius: 9.3, desktopRadius: 12.7, size: 'medium' },
+  { src: '/social/weibo.svg', label: '微博', href: '', band: 'high', glow: 'rgba(255, 130, 0, 0.56)', invert: false, angle: 216, mobileRadius: 7.8, desktopRadius: 10.5, size: 'small' },
 ] as const;
 
 export function Hero() {
@@ -55,8 +55,8 @@ export function Hero() {
               asChild
               className="group inline-flex cursor-pointer items-center gap-2 !px-5 !py-3.5 !text-[11px] !font-bold uppercase tracking-[0.22em]"
             >
-              <a href="#" target="_blank" rel="noreferrer">
-                个人博客
+              <a href="#story" className="group inline-flex items-center gap-2">
+                看看我的故事
                 <BookOpen className="h-3.5 w-3.5 text-white transition-transform duration-300 ease-out group-hover:scale-110" />
               </a>
             </ShinyButton>
@@ -102,28 +102,51 @@ export function Hero() {
                       className="social-orbit-item absolute left-1/2 top-1/2"
                       style={orbitStyle}
                     >
-                      <a
-                        href={platform.href}
-                        target={platform.href === '#' ? undefined : '_blank'}
-                        rel={platform.href === '#' ? undefined : 'noreferrer'}
-                        aria-label={platform.label}
-                        data-size={platform.size}
-                        data-invert={platform.invert || undefined}
-                        className="social-orbit-badge group pointer-events-auto relative flex h-11 w-11 items-center justify-center md:h-[52px] md:w-[52px]"
-                        style={{ '--platform-glow': platform.glow } as CSSProperties}
-                      >
-                        <span className="social-orbit-reactor relative flex h-full w-full items-center justify-center">
-                          <img
-                            src={platform.src}
-                            alt=""
-                            draggable={false}
-                            className="social-orbit-logo h-[72%] w-[72%] object-contain"
-                          />
-                          <span className="pointer-events-none absolute left-1/2 top-[calc(100%+8px)] -translate-x-1/2 whitespace-nowrap rounded-md border border-white/10 bg-[#10141b]/95 px-2 py-1 text-[10px] font-medium text-white/75 opacity-0 shadow-lg transition-opacity duration-200 group-hover:opacity-100">
-                            {platform.label}
+                      {platform.href ? (
+                        <a
+                          href={platform.href}
+                          target="_blank"
+                          rel="noreferrer"
+                          aria-label={platform.label}
+                          data-size={platform.size}
+                          data-invert={platform.invert || undefined}
+                          className="social-orbit-badge group pointer-events-auto relative flex h-11 w-11 items-center justify-center md:h-[52px] md:w-[52px]"
+                          style={{ '--platform-glow': platform.glow } as CSSProperties}
+                        >
+                          <span className="social-orbit-reactor relative flex h-full w-full items-center justify-center">
+                            <img
+                              src={platform.src}
+                              alt=""
+                              draggable={false}
+                              className="social-orbit-logo h-[72%] w-[72%] object-contain"
+                            />
+                            <span className="pointer-events-none absolute left-1/2 top-[calc(100%+8px)] -translate-x-1/2 whitespace-nowrap rounded-md border border-white/10 bg-[#10141b]/95 px-2 py-1 text-[10px] font-medium text-white/75 opacity-0 shadow-lg transition-opacity duration-200 group-hover:opacity-100">
+                              {platform.label}
+                            </span>
                           </span>
-                        </span>
-                      </a>
+                        </a>
+                      ) : (
+                        // 尚未提供真实链接的平台(如 B站/微博)保留可视图标,但不作为可点击链接,避免无效交互
+                        <div
+                          aria-label={platform.label}
+                          data-size={platform.size}
+                          data-invert={platform.invert || undefined}
+                          className="social-orbit-badge pointer-events-none relative flex h-11 w-11 items-center justify-center md:h-[52px] md:w-[52px]"
+                          style={{ '--platform-glow': platform.glow } as CSSProperties}
+                        >
+                          <span className="social-orbit-reactor relative flex h-full w-full items-center justify-center">
+                            <img
+                              src={platform.src}
+                              alt=""
+                              draggable={false}
+                              className="social-orbit-logo h-[72%] w-[72%] object-contain opacity-60"
+                            />
+                            <span className="pointer-events-none absolute left-1/2 top-[calc(100%+8px)] -translate-x-1/2 whitespace-nowrap rounded-md border border-white/10 bg-[#10141b]/95 px-2 py-1 text-[10px] font-medium text-white/60 opacity-0 shadow-lg transition-opacity duration-200 group-hover:opacity-100">
+                              {platform.label}（链接待补充）
+                            </span>
+                          </span>
+                        </div>
+                      )}
                     </div>
                   );
                 })}

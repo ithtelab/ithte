@@ -23,6 +23,8 @@ export function AvatarMusicGlow() {
   useEffect(() => {
     const glow = glowRef.current;
     if (!glow || !isPlaying || !audioAnalyser) return;
+    // 尊重系统"减弱动态效果":不驱动频谱/轨道动画,仅保留静态外观
+    if (window.matchMedia('(prefers-reduced-motion: reduce)').matches) return;
 
     const visualRoot = glow.closest<HTMLElement>('[data-audio-visual]');
     if (!visualRoot) return;

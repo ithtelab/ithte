@@ -1,13 +1,13 @@
 'use client';
 
-import { ReactNode, useEffect, useRef } from 'react';
+import { ReactNode, useEffect, useLayoutEffect, useRef } from 'react';
 import gsap from 'gsap';
 import { ScrollTrigger } from 'gsap/ScrollTrigger';
 
 export function Motion({ children }: { children: ReactNode }) {
   const rootRef = useRef<HTMLDivElement>(null);
 
-  useEffect(() => {
+  useLayoutEffect(() => {
     gsap.registerPlugin(ScrollTrigger);
 
     const ctx = gsap.context(() => {
@@ -24,6 +24,8 @@ export function Motion({ children }: { children: ReactNode }) {
         return;
       }
 
+      // 隐藏初始态放在 useLayoutEffect:SSR 水合后、浏览器绘制前完成置位,
+      // 避免首帧先闪出「未动画的最终态」再跳到隐藏并重播入场
       gsap.set('[data-hero-word]', { yPercent: 120, scaleY: 0.55, rotateX: 18, transformOrigin: '50% 100%', autoAlpha: 0 });
       gsap.set('[data-hero-meta], [data-hero-visual]', { y: 44, autoAlpha: 0, filter: 'blur(16px)' });
       gsap.set('[data-orbit-avatar]', { scale: 0.86, rotate: -4, autoAlpha: 0, filter: 'blur(10px)' });

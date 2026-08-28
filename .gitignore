@@ -25,8 +25,14 @@ npm-debug.log*
 yarn-debug.log*
 yarn-error.log*
 
-# local env files
-.env*.local
+# local env files(只保留 .env.example 入库,防止 NETEASE_COOKIE/ADMIN_TOKEN 等密钥被误提交)
+.env
+.env.*
+!.env.example
+
+# local tooling
+/.mimosa
+/.zcode
 
 # vercel
 .vercel
